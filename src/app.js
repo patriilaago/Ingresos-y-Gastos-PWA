@@ -11,7 +11,9 @@ import {
   doc,
   query,
   where,
-  getDocs
+  getDocs,
+  getDoc,
+  setDoc
 } from "./firebase.js";
 
 const appContainer = document.getElementById("app");
@@ -29,7 +31,14 @@ const state = {
   historyLoading: false,
   historyError: "",
   historyReq: 0,
-  cmpMonth: getCurrentMonthKey() // mes seleccionado en la comparativa
+  cmpMonth: getCurrentMonthKey(), // mes seleccionado en la comparativa
+  budget: null, // presupuesto mensual de gastos (€) o null
+  budgetLoaded: false,
+  budgetEditing: false,
+  budgetSaving: false,
+  budgetError: "",
+  catOpen: true, // desglose por categoría desplegado
+  filters: { query: "", type: "all" } // buscador y filtro rápido ("all" | "expense" | "income")
 };
 
 /* ---------- Iconos SVG inline ---------- */
@@ -51,6 +60,9 @@ const ICONS = {
   right: svg('<polyline points="9 18 15 12 9 6"/>'),
   wallet: svg('<path d="M20 12V8H6a2 2 0 0 1 0-4h12v4"/><path d="M4 6v12a2 2 0 0 0 2 2h14v-4"/><path d="M18 12a2 2 0 0 0 0 4h4v-4z"/>'),
   chart: svg('<line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/>'),
+  search: svg('<circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>'),
+  close: svg('<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>'),
+  chevron: svg('<polyline points="6 9 12 15 18 9"/>'),
   empty: svg('<rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8h8M8 12h8M8 16h4"/>')
 };
 
@@ -187,6 +199,7 @@ async function handleAddTransaction(txData) {
   try {
     const ref = await addDoc(userTransactionsRef(state.user.uid), txData);
     state.newTxId = ref.id;
+    state.filters = { query: "", type: "all" }; // para que se vea el nuevo movimiento
     const txMonth = txData.date.slice(0, 7);
     if (txMonth !== state.selectedMonth) {
       state.selectedMonth = txMonth;
@@ -211,6 +224,326 @@ async function handleDeleteTransaction(txId) {
     state.error = "No se pudo eliminar el movimiento.";
     renderApp();
   }
+}
+
+/* ---------- Presupuesto mensual (users/{uid}.monthlyBudget) ---------- */
+function getMonthTotals() {
+  let income = 0;
+  let expense = 0;
+  for (const t of state.transactions) {
+    const amount = Number(t.amount || 0);
+    if (t.type === "income") income += amount;
+    else if (t.type === "expense") expense += amount;
+  }
+  return { income, expense };
+}
+
+async function loadUserSettings() {
+  if (!state.user) return;
+  const uid = state.user.uid;
+  try {
+    const snap = await getDoc(doc(db, "users", uid));
+    const value = snap.exists() ? Number(snap.data().monthlyBudget) : NaN;
+    state.budget = Number.isFinite(value) && value > 0 ? value : null;
+    state.budgetError = "";
+  } catch (err) {
+    console.error(err);
+    state.budgetError = "No se pudo cargar el presupuesto.";
+  }
+  if (!state.user || state.user.uid !== uid) return; // la sesión cambió mientras cargaba
+  state.budgetLoaded = true;
+  mountBudgetCard();
+}
+
+async function saveBudget(value) {
+  if (!state.user) return;
+  state.budgetSaving = true;
+  state.budgetError = "";
+  mountBudgetCard();
+  try {
+    await setDoc(doc(db, "users", state.user.uid), { monthlyBudget: value }, { merge: true });
+    state.budget = value;
+    state.budgetEditing = false;
+  } catch (err) {
+    console.error(err);
+    state.budgetError = "No se pudo guardar el presupuesto.";
+  } finally {
+    state.budgetSaving = false;
+    mountBudgetCard();
+  }
+}
+
+function budgetLevel(pct) {
+  if (pct >= 100) return "danger";
+  if (pct >= 75) return "warn";
+  return "ok";
+}
+
+function budgetCardInner() {
+  const errorHtml = state.budgetError ? `<p class="error" role="alert">${escapeHtml(state.budgetError)}</p>` : "";
+
+  if (!state.budgetLoaded) {
+    return `<div class="budget-head"><h2 class="card-title">Presupuesto mensual</h2></div><div class="budget-skeleton"></div>`;
+  }
+
+  if (state.budgetEditing) {
+    return `
+      <form id="budget-form" class="budget-form">
+        <div class="budget-head"><h2 class="card-title">Presupuesto mensual</h2></div>
+        <label>
+          Límite mensual de gastos (€)
+          <input type="number" id="budget-input" step="0.01" min="0.01" required inputmode="decimal" placeholder="800,00" value="${state.budget ?? ""}" />
+        </label>
+        ${errorHtml}
+        <div class="budget-actions">
+          <button type="submit" ${state.budgetSaving ? "disabled" : ""}>Guardar</button>
+          <button type="button" class="secondary" id="budget-cancel">Cancelar</button>
+        </div>
+        ${state.budget != null ? `<button type="button" class="link-btn is-destructive" id="budget-remove">Quitar límite</button>` : ""}
+      </form>`;
+  }
+
+  if (state.budget == null) {
+    return `
+      <div class="budget-head">
+        <div>
+          <h2 class="card-title">Presupuesto mensual</h2>
+          <p class="subtitle budget-sub">Fija un límite de gasto y sigue tu progreso.</p>
+        </div>
+        <button type="button" class="link-btn" id="budget-edit-btn">Definir límite</button>
+      </div>
+      ${errorHtml}`;
+  }
+
+  const spent = getMonthTotals().expense;
+  const pct = (spent / state.budget) * 100;
+  const level = budgetLevel(pct);
+  const remaining = state.budget - spent;
+  const note =
+    remaining > 0 ? `Te quedan ${formatEuro(remaining)}` : remaining === 0 ? "Has alcanzado el límite" : `Te has pasado ${formatEuro(-remaining)}`;
+
+  return `
+    <div class="budget-head">
+      <h2 class="card-title">Presupuesto mensual</h2>
+      <button type="button" class="link-btn" id="budget-edit-btn">Editar</button>
+    </div>
+    <p class="budget-amounts num"><strong>${formatEuro(spent)}</strong> de ${formatEuro(state.budget)}</p>
+    <div class="budget-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.min(100, Math.round(pct))}" aria-label="Gasto del mes frente al presupuesto">
+      <div class="budget-fill" data-level="${level}" data-pct="${Math.min(100, pct).toFixed(2)}"></div>
+    </div>
+    <div class="budget-foot">
+      <span class="budget-note" data-level="${level}">${note}</span>
+      <span class="num">${Math.round(pct)} %</span>
+    </div>
+    ${errorHtml}`;
+}
+
+// Repinta solo la tarjeta de presupuesto (sin tocar el resto de la pantalla)
+function mountBudgetCard() {
+  const el = document.getElementById("budget-card");
+  if (!el) return;
+  el.innerHTML = budgetCardInner();
+  bindBudgetCard(el);
+  const fill = el.querySelector(".budget-fill");
+  if (fill) {
+    requestAnimationFrame(() =>
+      requestAnimationFrame(() => {
+        fill.style.width = `${fill.dataset.pct}%`;
+      })
+    );
+  }
+}
+
+function bindBudgetCard(el) {
+  const editBtn = el.querySelector("#budget-edit-btn");
+  if (editBtn) {
+    editBtn.addEventListener("click", () => {
+      state.budgetEditing = true;
+      state.budgetError = "";
+      mountBudgetCard();
+      const input = document.getElementById("budget-input");
+      if (input) {
+        input.focus();
+        input.select();
+      }
+    });
+  }
+
+  const cancelBtn = el.querySelector("#budget-cancel");
+  if (cancelBtn) {
+    cancelBtn.addEventListener("click", () => {
+      state.budgetEditing = false;
+      state.budgetError = "";
+      mountBudgetCard();
+    });
+  }
+
+  const removeBtn = el.querySelector("#budget-remove");
+  if (removeBtn) removeBtn.addEventListener("click", () => saveBudget(null));
+
+  const form = el.querySelector("#budget-form");
+  if (form) {
+    form.addEventListener("submit", (e) => {
+      e.preventDefault();
+      const value = Math.round(parseFloat(document.getElementById("budget-input").value) * 100) / 100;
+      if (!Number.isFinite(value) || value <= 0) {
+        state.budgetError = "Introduce un importe mayor que 0.";
+        mountBudgetCard();
+        return;
+      }
+      saveBudget(value);
+    });
+  }
+}
+
+/* ---------- Desglose de gastos por categoría (en memoria) ---------- */
+function getMonthExpenseByCategory() {
+  const map = new Map();
+  for (const tx of state.transactions) {
+    if (tx.type !== "expense") continue;
+    const label = String(tx.category || "General").trim().replace(/\s+/g, " ") || "General";
+    const key = normalize(label);
+    const entry = map.get(key) || { label: label.charAt(0).toUpperCase() + label.slice(1), total: 0 };
+    entry.total += Number(tx.amount || 0);
+    map.set(key, entry);
+  }
+  const list = [...map.values()].sort((a, b) => b.total - a.total);
+  const total = list.reduce((sum, c) => sum + c.total, 0);
+  return { list, total };
+}
+
+function renderCategoryBreakdown() {
+  const { list, total } = getMonthExpenseByCategory();
+  if (total <= 0) return "";
+
+  const rows = list
+    .map((c, i) => {
+      const pct = (c.total / total) * 100;
+      const hue = CAT_HUES[i % CAT_HUES.length];
+      return `
+        <li class="cat-row">
+          <div class="cat-head">
+            <span class="cat-name"><span class="cat-ico" style="--h:${hue}">${categoryIcon({ category: c.label, type: "expense" })}</span>${escapeHtml(c.label)}</span>
+            <span class="cat-amount num">${formatEuro(c.total)} <small>${pct < 1 ? "<1" : Math.round(pct)} %</small></span>
+          </div>
+          <div class="cat-track"><div class="cat-fill" style="--h:${hue};width:${pct.toFixed(2)}%"></div></div>
+        </li>`;
+    })
+    .join("");
+
+  return `
+    <details class="card cat-card" id="cat-details"${state.catOpen ? " open" : ""}>
+      <summary>
+        <span class="card-title">Gastos por categoría</span>
+        <span class="cat-summary-meta">${list.length} ${list.length === 1 ? "categoría" : "categorías"}<span class="chev">${ICONS.chevron}</span></span>
+      </summary>
+      <ul class="cat-list">${rows}</ul>
+    </details>`;
+}
+
+/* ---------- Buscador y filtros de movimientos (en memoria) ---------- */
+function getFilteredTransactions() {
+  const tokens = normalize(state.filters.query).split(/\s+/).filter(Boolean);
+  return state.transactions.filter((tx) => {
+    if (state.filters.type !== "all" && tx.type !== state.filters.type) return false;
+    if (tokens.length === 0) return true;
+    const haystack = normalize(`${tx.title || ""} ${tx.category || ""}`);
+    return tokens.every((t) => haystack.includes(t));
+  });
+}
+
+function hasActiveFilters() {
+  return state.filters.type !== "all" || state.filters.query.trim() !== "";
+}
+
+function escapeAttr(text) {
+  return escapeHtml(text).replace(/"/g, "&quot;");
+}
+
+function renderTxToolbar() {
+  const { query, type } = state.filters;
+  const options = [
+    ["all", "Todos"],
+    ["expense", "Gastos"],
+    ["income", "Ingresos"]
+  ];
+  return `
+    <div class="tx-toolbar">
+      <div class="search-field">
+        <span class="search-icon">${ICONS.search}</span>
+        <input type="search" id="tx-search" placeholder="Buscar movimientos" value="${escapeAttr(query)}" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" enterkeyhint="search" aria-label="Buscar movimientos" />
+        <button type="button" id="tx-search-clear" class="search-clear${query ? "" : " is-hidden"}" aria-label="Borrar búsqueda">${ICONS.close}</button>
+      </div>
+      <div class="segmented three" id="tx-filter" data-value="${type}" role="radiogroup" aria-label="Filtrar movimientos">
+        <span class="seg-thumb" aria-hidden="true"></span>
+        ${options
+          .map(
+            ([value, label]) =>
+              `<button type="button" class="seg-btn filter-btn${type === value ? " is-active" : ""}" data-filter="${value}" role="radio" aria-checked="${type === value}">${label}</button>`
+          )
+          .join("")}
+      </div>
+    </div>`;
+}
+
+// Sincroniza los controles con state.filters sin recrear el <input> (mantiene el foco)
+function syncFilterControls() {
+  const input = document.getElementById("tx-search");
+  if (!input) return;
+  if (input.value !== state.filters.query) input.value = state.filters.query;
+  document.getElementById("tx-search-clear").classList.toggle("is-hidden", state.filters.query === "");
+  const seg = document.getElementById("tx-filter");
+  seg.dataset.value = state.filters.type;
+  seg.querySelectorAll(".filter-btn").forEach((btn) => {
+    const active = btn.dataset.filter === state.filters.type;
+    btn.classList.toggle("is-active", active);
+    btn.setAttribute("aria-checked", String(active));
+  });
+}
+
+// Repinta solo la lista de resultados
+function refreshTxResults() {
+  const el = document.getElementById("tx-results");
+  if (!el) return;
+  el.innerHTML = renderTxResults();
+  bindTxResults(el);
+}
+
+function clearFilters() {
+  state.filters = { query: "", type: "all" };
+  syncFilterControls();
+  refreshTxResults();
+}
+
+function bindTxToolbar() {
+  const input = document.getElementById("tx-search");
+  if (!input) return;
+  const clearBtn = document.getElementById("tx-search-clear");
+
+  input.addEventListener("input", () => {
+    state.filters.query = input.value;
+    clearBtn.classList.toggle("is-hidden", input.value === "");
+    refreshTxResults();
+  });
+
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") input.blur(); // cierra el teclado en iPhone
+  });
+
+  clearBtn.addEventListener("click", () => {
+    state.filters.query = "";
+    syncFilterControls();
+    refreshTxResults();
+    input.focus();
+  });
+
+  document.querySelectorAll(".filter-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      state.filters.type = btn.dataset.filter;
+      syncFilterControls();
+      refreshTxResults();
+    });
+  });
 }
 
 /* ---------- Comparativa ---------- */
@@ -606,7 +939,7 @@ function renderTxItem(tx) {
   `;
 }
 
-function renderTransactionsSection() {
+function renderTxResults() {
   if (state.loading) {
     return `
       <div class="loading-row" role="status">
@@ -624,15 +957,43 @@ function renderTransactionsSection() {
       </section>`;
   }
 
-  return groupByDate(state.transactions)
-    .map(
-      (group) => `
+  const filtered = getFilteredTransactions();
+
+  if (filtered.length === 0) {
+    const q = state.filters.query.trim();
+    const detail = q
+      ? `Ningún movimiento coincide con “${escapeHtml(q)}”${state.filters.type !== "all" ? " en este filtro" : ""}.`
+      : `No hay ${state.filters.type === "income" ? "ingresos" : "gastos"} en este mes.`;
+    return `
+      <section class="card empty">
+        <div class="empty-icon">${ICONS.search}</div>
+        <h2>Sin resultados</h2>
+        <p>${detail}</p>
+        <button type="button" class="secondary" id="clear-filters-btn">Limpiar filtros</button>
+      </section>`;
+  }
+
+  const count = hasActiveFilters()
+    ? `<p class="result-count">${filtered.length} ${filtered.length === 1 ? "resultado" : "resultados"}</p>`
+    : "";
+
+  return (
+    count +
+    groupByDate(filtered)
+      .map(
+        (group) => `
         <section>
           <h2 class="day-title">${escapeHtml(formatDayHeader(group.date))}</h2>
           <ul class="tx-list">${group.items.map(renderTxItem).join("")}</ul>
         </section>`
-    )
-    .join("");
+      )
+      .join("")
+  );
+}
+
+function renderTransactionsSection() {
+  const toolbar = state.transactions.length > 0 ? renderTxToolbar() : "";
+  return `${toolbar}<div id="tx-results">${renderTxResults()}</div>`;
 }
 
 function renderDashboard() {
@@ -687,6 +1048,10 @@ function renderDashboard() {
           <span class="stat-value expense-text num">${formatEuro(totalExpense)}</span>
         </div>
       </section>
+
+      <section class="card budget" id="budget-card"></section>
+
+      ${renderCategoryBreakdown()}
 
       <section class="card">
         <form id="tx-form">
@@ -750,7 +1115,7 @@ function renderDashboard() {
   });
 
   // Control segmentado Gasto / Ingreso (escribe en #tx-type, que app.js ya lee)
-  const segmented = document.querySelector(".segmented");
+  const segmented = document.querySelector("#tx-form .segmented");
   const typeInput = document.getElementById("tx-type");
   segmented.querySelectorAll(".seg-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
@@ -778,8 +1143,23 @@ function renderDashboard() {
     await handleAddTransaction({ type, amount, title, category, date });
   });
 
-  // Eliminar con doble toque: el primero pide confirmación, el segundo borra
-  document.querySelectorAll(".delete-btn").forEach((btn) => {
+  // Módulos nuevos
+  mountBudgetCard();
+  const catDetails = document.getElementById("cat-details");
+  if (catDetails) {
+    catDetails.addEventListener("toggle", () => {
+      state.catOpen = catDetails.open;
+    });
+  }
+  bindTxToolbar();
+  bindTxResults(document.getElementById("tx-results"));
+}
+
+// Eliminar con doble toque (el primero pide confirmación, el segundo borra) y "Limpiar filtros"
+function bindTxResults(scope) {
+  if (!scope) return;
+
+  scope.querySelectorAll(".delete-btn").forEach((btn) => {
     const originalHtml = btn.innerHTML;
     let timer;
 
@@ -803,6 +1183,9 @@ function renderDashboard() {
       setTimeout(() => handleDeleteTransaction(btn.dataset.id), 220);
     });
   });
+
+  const clearBtn = scope.querySelector("#clear-filters-btn");
+  if (clearBtn) clearBtn.addEventListener("click", clearFilters);
 }
 
 function escapeHtml(text) {
@@ -824,11 +1207,17 @@ function renderApp() {
 onAuthStateChanged(auth, async (user) => {
   state.user = user;
   if (user) {
+    state.budgetLoaded = false;
+    loadUserSettings(); // en paralelo: no retrasa la primera carga
     await loadMonthTransactions();
   } else {
     state.transactions = [];
     state.history = [];
     state.view = "summary";
+    state.budget = null;
+    state.budgetLoaded = false;
+    state.budgetEditing = false;
+    state.filters = { query: "", type: "all" };
     renderApp();
   }
 });

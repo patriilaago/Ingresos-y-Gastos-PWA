@@ -994,3 +994,276 @@ button.danger.armed {
   from { transform: scaleX(0); }
   to { transform: scaleX(1); }
 }
+
+/* ===== Módulo 1: presupuesto mensual ===== */
+:root {
+  --warning: #ff9500;
+  --warning-text: #b45f00;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --warning: #ff9f0a;
+    --warning-text: #ff9f0a;
+  }
+}
+
+.budget-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+.budget .card-title {
+  margin: 0;
+}
+
+.budget-sub {
+  margin: 2px 0 0;
+  font-size: 0.85rem;
+}
+
+.link-btn {
+  flex: none;
+  padding: 0 10px;
+  margin-right: -10px;
+  background: transparent;
+  color: var(--primary);
+  font-size: 0.95rem;
+}
+
+.link-btn.is-destructive {
+  align-self: center;
+  margin-right: 0;
+  color: var(--expense);
+}
+
+.budget-amounts {
+  margin: 8px 0 12px;
+  color: var(--muted);
+}
+
+.budget-amounts strong {
+  color: var(--text);
+  font-size: 1.4rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.budget-track {
+  height: 10px;
+  overflow: hidden;
+  background: var(--fill);
+  border-radius: 999px;
+}
+
+.budget-fill {
+  width: 0;
+  height: 100%;
+  background: var(--income);
+  border-radius: 999px;
+  transition: width 0.7s var(--ease), background-color 0.3s;
+}
+
+.budget-fill[data-level="warn"] {
+  background: var(--warning);
+}
+
+.budget-fill[data-level="danger"] {
+  background: var(--expense);
+}
+
+.budget-foot {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 10px;
+  font-size: 0.88rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.budget-note {
+  color: var(--muted);
+}
+
+.budget-note[data-level="warn"] {
+  color: var(--warning-text);
+}
+
+.budget-note[data-level="danger"] {
+  color: var(--expense);
+}
+
+.budget-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.budget-skeleton {
+  height: 48px;
+  margin-top: 12px;
+  background: var(--fill);
+  border-radius: 12px;
+  animation: pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  50% { opacity: 0.45; }
+}
+
+.budget .error {
+  margin: 12px 0 0;
+}
+
+/* ===== Módulo 2: desglose por categoría (plegable) ===== */
+.cat-card summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 44px;
+  margin: -8px 0;
+  list-style: none;
+  cursor: pointer;
+}
+
+.cat-card summary::-webkit-details-marker {
+  display: none;
+}
+
+.cat-card .card-title {
+  margin: 0;
+}
+
+.cat-summary-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.chev svg {
+  display: block;
+  width: 18px;
+  height: 18px;
+  transition: transform 0.25s var(--ease);
+}
+
+.cat-card[open] .chev svg {
+  transform: rotate(180deg);
+}
+
+.cat-card > .cat-list {
+  margin-top: 20px;
+}
+
+.cat-ico {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  color: hsl(var(--h) 65% 40%);
+  background: hsl(var(--h) 70% 55% / 0.16);
+  border-radius: 50%;
+}
+
+.cat-ico svg {
+  width: 15px;
+  height: 15px;
+}
+
+@media (prefers-color-scheme: dark) {
+  .cat-ico {
+    color: hsl(var(--h) 80% 68%);
+  }
+}
+
+/* ===== Módulo 3: buscador y filtros ===== */
+.tx-toolbar {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+.search-field {
+  position: relative;
+}
+
+.search-field input {
+  padding-left: 42px;
+  padding-right: 48px;
+}
+
+.search-field input::-webkit-search-cancel-button,
+.search-field input::-webkit-search-decoration {
+  -webkit-appearance: none;
+  display: none;
+}
+
+.search-icon {
+  position: absolute;
+  top: 0;
+  left: 14px;
+  height: 48px;
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  pointer-events: none;
+}
+
+.search-icon svg {
+  width: 18px;
+  height: 18px;
+}
+
+.search-clear {
+  position: absolute;
+  top: 2px;
+  right: 0;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  background: transparent;
+  color: var(--muted);
+}
+
+.search-clear svg {
+  width: 18px;
+  height: 18px;
+}
+
+.search-clear.is-hidden {
+  display: none;
+}
+
+.tx-toolbar .segmented.three {
+  margin-bottom: 0;
+}
+
+/* El filtro usa los valores all / expense / income */
+.segmented.three[data-value="expense"] .seg-thumb {
+  transform: translateX(100%);
+}
+
+.segmented.three[data-value="income"] .seg-thumb {
+  transform: translateX(200%);
+}
+
+.result-count {
+  margin: 14px 6px 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.empty .secondary {
+  margin-top: 18px;
+  padding: 0 22px;
+}
