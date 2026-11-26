@@ -22,7 +22,14 @@ const state = {
   transactions: [],
   loading: false,
   error: "",
-  newTxId: null // id del último movimiento añadido (para animarlo)
+  newTxId: null, // id del último movimiento añadido (para animarlo)
+  view: "summary", // "summary" | "compare"
+  range: 6, // meses de la comparativa: 3 | 6 | 12
+  history: [],
+  historyLoading: false,
+  historyError: "",
+  historyReq: 0,
+  cmpMonth: getCurrentMonthKey() // mes seleccionado en la comparativa
 };
 
 /* ---------- Iconos SVG inline ---------- */
@@ -43,6 +50,7 @@ const ICONS = {
   left: svg('<polyline points="15 18 9 12 15 6"/>'),
   right: svg('<polyline points="9 18 15 12 9 6"/>'),
   wallet: svg('<path d="M20 12V8H6a2 2 0 0 1 0-4h12v4"/><path d="M4 6v12a2 2 0 0 0 2 2h14v-4"/><path d="M18 12a2 2 0 0 0 0 4h4v-4z"/>'),
+  chart: svg('<line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/>'),
   empty: svg('<rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8h8M8 12h8M8 16h4"/>')
 };
 
@@ -205,6 +213,319 @@ async function handleDeleteTransaction(txId) {
   }
 }
 
+/* ---------- Comparativa ---------- */
+const CAT_HUES = [211, 152, 35, 280, 350, 190, 45];
+
+function formatCompact(value) {
+  return new Intl.NumberFormat("es-ES", { notation: "compact", maximumFractionDigits: 1 }).format(value);
+}
+
+function monthShort(monthKey) {
+  const [y, m] = monthKey.split("-").map(Number);
+  return new Date(y, m - 1, 1).toLocaleDateString("es-ES", { month: "short" }).replace(".", "");
+}
+
+function niceCeil(v) {
+  const p = Math.pow(10, Math.floor(Math.log10(v)));
+  const n = v / p;
+  const m = n <= 1 ? 1 : n <= 2 ? 2 : n <= 5 ? 5 : 10;
+  return m * p;
+}
+
+async function loadHistory() {
+  if (!state.user) return;
+  const req = ++state.historyReq;
+  state.historyLoading = true;
+  state.historyError = "";
+  if (state.view === "compare") renderApp();
+
+  try {
+    const current = getCurrentMonthKey();
+    const start = `${shiftMonth(current, -(state.range - 1))}-01`;
+    const end = `${current}-31`;
+    const q = query(
+      userTransactionsRef(state.user.uid),
+      where("date", ">=", start),
+      where("date", "<=", end)
+    );
+    const snapshot = await getDocs(q);
+    if (req !== state.historyReq) return;
+    state.history = snapshot.docs.map((d) => ({ id: d.id, ...d.data() }));
+  } catch (err) {
+    if (req !== state.historyReq) return;
+    console.error(err);
+    state.historyError = "No se pudo cargar la comparativa.";
+  } finally {
+    if (req === state.historyReq) {
+      state.historyLoading = false;
+      if (state.view === "compare") renderApp();
+    }
+  }
+}
+
+function setView(view) {
+  state.view = view;
+  if (view === "compare") {
+    loadHistory();
+  } else {
+    renderApp();
+  }
+}
+
+function buildCompareRows() {
+  const current = getCurrentMonthKey();
+  const rows = [];
+  for (let i = state.range - 1; i >= 0; i--) {
+    rows.push({ key: shiftMonth(current, -i), income: 0, expense: 0, balance: 0, count: 0 });
+  }
+  const byKey = new Map(rows.map((r) => [r.key, r]));
+  for (const tx of state.history) {
+    const row = byKey.get((tx.date || "").slice(0, 7));
+    if (!row) continue;
+    const amount = Number(tx.amount || 0);
+    if (tx.type === "income") row.income += amount;
+    else if (tx.type === "expense") row.expense += amount;
+    row.count++;
+  }
+  rows.forEach((r) => (r.balance = r.income - r.expense));
+  return rows;
+}
+
+function expenseByCategory(monthKey) {
+  const map = new Map();
+  for (const tx of state.history) {
+    if (tx.type !== "expense" || !(tx.date || "").startsWith(monthKey)) continue;
+    const label = (tx.category || "General").trim() || "General";
+    const key = normalize(label);
+    const entry = map.get(key) || { label: label.charAt(0).toUpperCase() + label.slice(1), total: 0 };
+    entry.total += Number(tx.amount || 0);
+    map.set(key, entry);
+  }
+  const list = [...map.values()].sort((a, b) => b.total - a.total);
+  if (list.length > 6) {
+    const rest = list.slice(5).reduce((s, e) => s + e.total, 0);
+    return [...list.slice(0, 5), { label: "Otras", total: rest }];
+  }
+  return list;
+}
+
+function monthAxisLabel(rows, i, x, y) {
+  const key = rows[i].key;
+  const showYear = i === 0 || key.endsWith("-01");
+  return `<text class="chart-label" x="${x}" y="${y}" text-anchor="middle">${monthShort(key)}</text>${
+    showYear ? `<text class="chart-label chart-year" x="${x}" y="${y + 11}" text-anchor="middle">’${key.slice(2, 4)}</text>` : ""
+  }`;
+}
+
+function renderBarChart(rows) {
+  const W = 340, H = 196, padL = 36, padR = 6, padT = 10, padB = 38;
+  const plotW = W - padL - padR;
+  const plotH = H - padT - padB;
+  const max = niceCeil(Math.max(1, ...rows.flatMap((r) => [r.income, r.expense])));
+  const gw = plotW / rows.length;
+  const bw = Math.min(14, gw * 0.32);
+  const y = (v) => padT + plotH - (v / max) * plotH;
+
+  const grid = [0, 0.5, 1]
+    .map((t) => {
+      const yy = y(max * t);
+      return `<line class="chart-grid" x1="${padL}" x2="${W - padR}" y1="${yy}" y2="${yy}"/>
+        <text class="chart-label" x="${padL - 6}" y="${yy + 3}" text-anchor="end">${formatCompact(max * t)}</text>`;
+    })
+    .join("");
+
+  const groups = rows
+    .map((r, i) => {
+      const cx = padL + gw * i + gw / 2;
+      const base = padT + plotH;
+      return `<g class="chart-group" data-month="${r.key}">
+        <rect class="chart-hit${r.key === state.cmpMonth ? " is-selected" : ""}" x="${padL + gw * i + 1}" y="${padT}" width="${gw - 2}" height="${plotH + padB - 6}" rx="6"/>
+        <rect class="bar-income" x="${cx - bw - 1}" y="${y(r.income)}" width="${bw}" height="${base - y(r.income)}" rx="3"/>
+        <rect class="bar-expense" x="${cx + 1}" y="${y(r.expense)}" width="${bw}" height="${base - y(r.expense)}" rx="3"/>
+        ${monthAxisLabel(rows, i, cx, H - padB + 14)}
+      </g>`;
+    })
+    .join("");
+
+  return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Ingresos y gastos por mes">${grid}${groups}</svg>`;
+}
+
+function renderBalanceChart(rows) {
+  const W = 340, H = 170, padL = 36, padR = 14, padT = 14, padB = 34;
+  const plotW = W - padL - padR;
+  const plotH = H - padT - padB;
+  const vals = rows.map((r) => r.balance);
+  const lo = Math.min(0, ...vals);
+  let hi = Math.max(0, ...vals);
+  if (hi === lo) hi = lo + 1;
+  const y = (v) => padT + plotH - ((v - lo) / (hi - lo)) * plotH;
+  const x = (i) => (rows.length === 1 ? padL + plotW / 2 : padL + 10 + ((plotW - 20) * i) / (rows.length - 1));
+
+  const points = rows.map((r, i) => `${x(i)},${y(r.balance)}`);
+  const area = `${x(0)},${y(0)} ${points.join(" ")} ${x(rows.length - 1)},${y(0)}`;
+
+  const labels = [hi > 0 ? hi : null, 0, lo < 0 ? lo : null]
+    .filter((v) => v !== null)
+    .map((v) => `<text class="chart-label" x="${padL - 6}" y="${y(v) + 3}" text-anchor="end">${formatCompact(v)}</text>`)
+    .join("");
+
+  const dots = rows
+    .map(
+      (r, i) => `<g class="chart-group" data-month="${r.key}">
+        <circle class="line-dot${r.key === state.cmpMonth ? " is-selected" : ""}" cx="${x(i)}" cy="${y(r.balance)}" r="${r.key === state.cmpMonth ? 5 : 3.5}"/>
+        <circle class="chart-tap" cx="${x(i)}" cy="${y(r.balance)}" r="14"/>
+        ${monthAxisLabel(rows, i, x(i), H - padB + 14)}
+      </g>`
+    )
+    .join("");
+
+  return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Balance mensual">
+    <line class="chart-zero" x1="${padL}" x2="${W - padR}" y1="${y(0)}" y2="${y(0)}"/>
+    ${labels}
+    <polygon class="line-area" points="${area}"/>
+    <polyline class="line-path" points="${points.join(" ")}"/>
+    ${dots}
+  </svg>`;
+}
+
+function renderCompareBody(rows) {
+  if (state.historyLoading) {
+    return `<div class="loading-row" role="status"><span class="spinner" aria-hidden="true"></span><p>Calculando comparativa…</p></div>`;
+  }
+  if (state.historyError) return `<p class="error" role="alert">${state.historyError}</p>`;
+
+  const active = rows.filter((r) => r.count > 0);
+  if (active.length === 0) {
+    return `
+      <section class="card empty">
+        <div class="empty-icon">${ICONS.chart}</div>
+        <h2>Aún no hay datos que comparar</h2>
+        <p>Registra movimientos en la pestaña Resumen y aquí verás la evolución mes a mes.</p>
+      </section>`;
+  }
+
+  const avgExpense = active.reduce((s, r) => s + r.expense, 0) / active.length;
+  const best = active.reduce((a, b) => (b.balance > a.balance ? b : a));
+  const worst = active.reduce((a, b) => (b.balance < a.balance ? b : a));
+
+  const idx = rows.findIndex((r) => r.key === state.cmpMonth);
+  const prev = idx > 0 ? rows[idx - 1] : null;
+  let variation = `<span class="stat-value num">—</span>`;
+  if (prev && prev.expense > 0) {
+    const pct = ((rows[idx].expense - prev.expense) / prev.expense) * 100;
+    const up = pct > 0;
+    variation = `<span class="stat-value num ${up ? "expense-text" : "income-text"}">${up ? "+" : "−"}${Math.abs(pct).toFixed(0)} %</span>`;
+  }
+
+  const cats = expenseByCategory(state.cmpMonth);
+  const catTotal = cats.reduce((s, c) => s + c.total, 0);
+  const catList = cats.length
+    ? `<ul class="cat-list">${cats
+        .map((c, i) => {
+          const pct = catTotal ? (c.total / catTotal) * 100 : 0;
+          const hue = CAT_HUES[i % CAT_HUES.length];
+          return `<li class="cat-row">
+            <div class="cat-head">
+              <span class="cat-name"><i class="cat-dot" style="--h:${hue}"></i>${escapeHtml(c.label)}</span>
+              <span class="cat-amount num">${formatEuro(c.total)} <small>${pct.toFixed(0)} %</small></span>
+            </div>
+            <div class="cat-track"><div class="cat-fill" style="--h:${hue};width:${pct}%"></div></div>
+          </li>`;
+        })
+        .join("")}</ul>`
+    : `<p class="subtitle">Sin gastos en este mes.</p>`;
+
+  return `
+    <section class="summary-grid">
+      <div class="stat"><span class="stat-label">Gasto medio al mes</span><span class="stat-value num">${formatEuro(avgExpense)}</span></div>
+      <div class="stat"><span class="stat-label">Gastos vs. mes anterior</span>${variation}<span class="stat-note">${escapeHtml(formatMonthTitle(state.cmpMonth))}</span></div>
+      <div class="stat"><span class="stat-label">Mejor mes</span><span class="stat-value num income-text">${formatEuro(best.balance)}</span><span class="stat-note">${escapeHtml(formatMonthTitle(best.key))}</span></div>
+      <div class="stat"><span class="stat-label">Peor mes</span><span class="stat-value num ${worst.balance < 0 ? "expense-text" : ""}">${formatEuro(worst.balance)}</span><span class="stat-note">${escapeHtml(formatMonthTitle(worst.key))}</span></div>
+    </section>
+
+    <section class="card">
+      <h2 class="card-title">Ingresos y gastos</h2>
+      ${renderBarChart(rows)}
+      <div class="legend"><span><i class="bar-income-dot"></i>Ingresos</span><span><i class="bar-expense-dot"></i>Gastos</span><span class="legend-hint">Toca un mes para ver su detalle</span></div>
+    </section>
+
+    <section class="card">
+      <h2 class="card-title">Balance mensual</h2>
+      ${renderBalanceChart(rows)}
+    </section>
+
+    <section class="card">
+      <h2 class="card-title">Gastos por categoría</h2>
+      <p class="subtitle cat-sub">${escapeHtml(formatMonthTitle(state.cmpMonth))} · ${formatEuro(catTotal)}</p>
+      ${catList}
+    </section>`;
+}
+
+function renderTabbar(active) {
+  const tab = (id, view, icon, label) =>
+    `<button type="button" id="${id}" class="tab${active === view ? " is-active" : ""}" ${active === view ? 'aria-current="page"' : ""}>${icon}<span>${label}</span></button>`;
+  return `<nav class="tabbar" aria-label="Secciones">
+    ${tab("tab-summary", "summary", ICONS.wallet, "Resumen")}
+    ${tab("tab-compare", "compare", ICONS.chart, "Comparativa")}
+  </nav>`;
+}
+
+function bindTabs() {
+  document.getElementById("tab-summary").addEventListener("click", () => {
+    if (state.view !== "summary") setView("summary");
+  });
+  document.getElementById("tab-compare").addEventListener("click", () => {
+    if (state.view !== "compare") setView("compare");
+  });
+}
+
+function renderCompare() {
+  const rows = buildCompareRows();
+  if (!rows.some((r) => r.key === state.cmpMonth)) state.cmpMonth = rows[rows.length - 1].key;
+
+  appContainer.innerHTML = `
+    <main class="container has-tabbar">
+      <header class="topbar">
+        <div>
+          <h1>Comparativa</h1>
+          <p class="subtitle">Evolución mes a mes</p>
+        </div>
+      </header>
+
+      <div class="segmented three" data-value="${state.range}" role="radiogroup" aria-label="Rango de meses">
+        <span class="seg-thumb" aria-hidden="true"></span>
+        ${[3, 6, 12]
+          .map(
+            (n) =>
+              `<button type="button" class="seg-btn range-btn${state.range === n ? " is-active" : ""}" data-range="${n}" role="radio" aria-checked="${state.range === n}">${n} meses</button>`
+          )
+          .join("")}
+      </div>
+
+      <div class="compare-body">${renderCompareBody(rows)}</div>
+    </main>
+    ${renderTabbar("compare")}
+  `;
+
+  bindTabs();
+
+  document.querySelectorAll(".range-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const next = Number(btn.dataset.range);
+      if (next === state.range) return;
+      state.range = next;
+      loadHistory();
+    });
+  });
+
+  document.querySelectorAll(".chart-group").forEach((g) => {
+    g.addEventListener("click", () => {
+      state.cmpMonth = g.dataset.month;
+      renderCompare();
+    });
+  });
+}
+
 /* ---------- Vistas ---------- */
 function renderLogin() {
   appContainer.innerHTML = `
@@ -330,7 +651,7 @@ function renderDashboard() {
       : `${state.selectedMonth}-01`;
 
   appContainer.innerHTML = `
-    <main class="container">
+    <main class="container has-tabbar">
       <header class="topbar">
         <div>
           <h1>Mis Finanzas</h1>
@@ -409,12 +730,14 @@ function renderDashboard() {
 
       ${renderTransactionsSection()}
     </main>
+    ${renderTabbar("summary")}
   `;
 
   // El resaltado de "nuevo" solo se consume cuando la lista ya se ha pintado
   if (!state.loading) state.newTxId = null;
 
   document.getElementById("logout-btn").addEventListener("click", () => signOut(auth));
+  bindTabs();
 
   document.getElementById("prev-month").addEventListener("click", () => {
     state.selectedMonth = shiftMonth(state.selectedMonth, -1);
@@ -491,6 +814,8 @@ function escapeHtml(text) {
 function renderApp() {
   if (!state.user) {
     renderLogin();
+  } else if (state.view === "compare") {
+    renderCompare();
   } else {
     renderDashboard();
   }
@@ -502,6 +827,8 @@ onAuthStateChanged(auth, async (user) => {
     await loadMonthTransactions();
   } else {
     state.transactions = [];
+    state.history = [];
+    state.view = "summary";
     renderApp();
   }
 });
