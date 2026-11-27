@@ -1267,3 +1267,12 @@ button.danger.armed {
   margin-top: 18px;
   padding: 0 22px;
 }
+
+/* Filtro de movimientos: valores de EstadoApp.filtroTipo */
+.segmented.three[data-value="gastos"] .seg-thumb {
+  transform: translateX(100%);
+}
+
+.segmented.three[data-value="ingresos"] .seg-thumb {
+  transform: translateX(200%);
+}

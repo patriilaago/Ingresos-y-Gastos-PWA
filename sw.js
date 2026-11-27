@@ -1,4 +1,4 @@
-// version: 2
+// version: 3
 self.addEventListener("install", () => {
   self.skipWaiting();
 });
